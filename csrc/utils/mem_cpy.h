@@ -42,18 +42,24 @@ void xpuAsyncMemcpy(
  *
  * For H2D: snapshots all source blocks through a single contiguous pinned
  *   staging buffer so the caller may safely mutate host memory immediately.
+ *   With snapshot_src=false and every source in pinned (USM host) memory,
+ *   copies directly from the sources instead, in stream order; the caller
+ *   must then not modify the sources until the copies have completed.
  * For D2H / D2D: direct async DMA without staging.
  *
  * @param src_ptrs   Array of N raw source addresses
  * @param dst_ptrs   Array of N raw destination addresses
  * @param sizes      Array of N byte counts
  * @param n          Number of entries
+ * @param snapshot_src  For H2D from pinned sources: stage (true) or copy
+ *                      directly (false). Pageable sources are always staged.
  */
 void xpuAsyncMemcpyBatch(
     const uint64_t* src_ptrs,
     const uint64_t* dst_ptrs,
     const uint64_t* sizes,
-    int64_t n);
+    int64_t n,
+    bool snapshot_src = true);
 
 }  // namespace xpu
 }  // namespace vllm

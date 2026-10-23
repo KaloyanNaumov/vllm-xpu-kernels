@@ -183,7 +183,8 @@ void xpuAsyncMemcpyBatch(
     const uint64_t* src_ptrs,
     const uint64_t* dst_ptrs,
     const uint64_t* sizes,
-    int64_t n) {
+    int64_t n,
+    bool snapshot_src) {
   if (n == 0) return;
 
   // Scan the first non-zero entry to determine copy direction.
@@ -231,6 +232,19 @@ void xpuAsyncMemcpyBatch(
     total_bytes += sizes[i];
   }
 
+  // Without a snapshot, pinned (USM host) sources are copied directly.
+  if (needs_staging && !snapshot_src) {
+    auto ctx = vllm::xpu::vllmGetQueue(0).get_context();
+    bool all_pinned = true;
+    for (int64_t i = 0; i < n && all_pinned; i++) {
+      if (sizes[i] == 0) continue;
+      all_pinned = sycl::get_pointer_type(
+                       reinterpret_cast<const void*>(src_ptrs[i]), ctx) ==
+                   sycl::usm::alloc::host;
+    }
+    needs_staging = !all_pinned;
+  }
+
   if (needs_staging) {
     // H2D: allocate one contiguous pinned staging buffer, snapshot all source
     // blocks, then submit all async DMAs.  This avoids N separate allocator
@@ -273,8 +287,9 @@ void xpuAsyncMemcpyBatch(
           at::xpu::getCurrentXPUStream());
     }
   } else {
-    // D2H or D2D: dst_is_pageable was probed once from the first non-zero
-    // entry (all entries share the same direction and memory class).
+    // Unstaged H2D, D2H or D2D: dst_is_pageable was probed once from the
+    // first non-zero entry (all entries share the same direction and memory
+    // class).
     // Pageable D2H is unsafe with async DMA; fall back to sync copy.
     for (int64_t i = 0; i < n; i++) {
       size_t sz = static_cast<size_t>(sizes[i]);

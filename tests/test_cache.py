@@ -112,6 +112,9 @@ MINI_PYTEST_PARAMS = {
     "test_swap_blocks_batch_h2d_mutation_race": {
         "device": ["xpu:0"],
     },
+    "test_swap_blocks_batch_h2d_pinned_no_snapshot": {
+        "device": ["xpu:0"],
+    },
     "test_gather_and_maybe_dequant_cache_mla": {
         "block_size": [8],
         "num_blocks": [8],
@@ -1114,6 +1117,52 @@ def test_swap_blocks_batch_h2d_mutation_race(device: str) -> None:
             dst_val[0][db].cpu(),
             msg=f"Value block {sb}→{db} corrupted by post-call mutation",
         )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_swap_blocks_batch_h2d_pinned_no_snapshot(device: str) -> None:
+    """With snapshot_src=False, H2D from pinned memory reads the source in
+    stream order: it must see a non-blocking D2H copy into the same pinned
+    buffer that was queued just before it."""
+    torch.xpu.set_device(device)
+
+    n_blocks = 32
+    block_elems = 1 << 12
+    mm = 2048
+    trials = 8
+    poison, value = -7.0, 3.0
+
+    src = torch.empty(n_blocks * block_elems,
+                      device=device,
+                      dtype=torch.float32)
+    host = torch.full(src.shape, poison, dtype=src.dtype, pin_memory=True)
+    assert host.is_pinned()
+    dst = torch.empty_like(src)
+    stride_bytes = block_elems * src.element_size()
+    block_mapping = [(i, i) for i in range(n_blocks)]
+    sp, dp, sz = _build_batch_args(host.view(n_blocks, block_elems),
+                                   dst.view(n_blocks, block_elems),
+                                   block_mapping, stride_bytes)
+
+    a = torch.randn(mm, mm, device=device, dtype=torch.float32)
+    b = torch.randn(mm, mm, device=device, dtype=torch.float32)
+
+    for t in range(trials):
+        host.fill_(poison)
+        dst.fill_(poison)
+        torch.xpu.synchronize(device)
+        # Keep the stream busy so the D2H copy is still pending when
+        # swap_blocks_batch is called.
+        c = a
+        for _ in range(6):
+            c = torch.mm(c, b)
+        src.fill_(value + t)
+        host.copy_(src, non_blocking=True)
+        ops.swap_blocks_batch(sp, dp, sz, snapshot_src=False)
+        torch.xpu.synchronize(device)
+        assert torch.all(dst == value + t), (
+            f"trial {t}: H2D copy did not see the preceding D2H copy")
 
 
 @pytest.mark.skipif(torch.xpu.device_count() < 2,
