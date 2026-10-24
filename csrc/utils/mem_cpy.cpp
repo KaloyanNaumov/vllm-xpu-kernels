@@ -232,15 +232,18 @@ void xpuAsyncMemcpyBatch(
     total_bytes += sizes[i];
   }
 
-  // Without a snapshot, pinned (USM host) sources are copied directly.
+  // Without a snapshot, pinned sources (USM host, or registered with
+  // xpu_host_register) are copied directly.
   if (needs_staging && !snapshot_src) {
     auto ctx = vllm::xpu::vllmGetQueue(0).get_context();
     bool all_pinned = true;
     for (int64_t i = 0; i < n && all_pinned; i++) {
       if (sizes[i] == 0) continue;
-      all_pinned = sycl::get_pointer_type(
-                       reinterpret_cast<const void*>(src_ptrs[i]), ctx) ==
-                   sycl::usm::alloc::host;
+      const void* src = reinterpret_cast<const void*>(src_ptrs[i]);
+      const auto type = sycl::get_pointer_type(src, ctx);
+      all_pinned = type == sycl::usm::alloc::host ||
+                   (type == sycl::usm::alloc::unknown &&
+                    isHostRegistered(src, static_cast<size_t>(sizes[i])));
     }
     needs_staging = !all_pinned;
   }

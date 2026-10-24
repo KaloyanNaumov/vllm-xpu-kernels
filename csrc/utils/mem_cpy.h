@@ -33,6 +33,11 @@ void xpuAsyncMemcpy(
     const void* hctx,
     bool is_pinned);
 
+// True if [ptr, ptr + n_bytes) lies inside one range registered with
+// xpu_host_register (prepare_for_device_copy): DMA-capable host memory that
+// sycl::get_pointer_type() reports as usm::alloc::unknown.
+bool isHostRegistered(const void* ptr, size_t n_bytes);
+
 /**
  * @brief Batch async memcpy: copies N independent (src, dst, size) triples
  *        in a single call, amortising per-copy overhead.
@@ -42,8 +47,9 @@ void xpuAsyncMemcpy(
  *
  * For H2D: snapshots all source blocks through a single contiguous pinned
  *   staging buffer so the caller may safely mutate host memory immediately.
- *   With snapshot_src=false and every source in pinned (USM host) memory,
- *   copies directly from the sources instead, in stream order; the caller
+ *   With snapshot_src=false and every source in pinned memory (USM host, or
+ *   a range registered with xpu_host_register), copies directly from the
+ *   sources instead, in stream order; the caller
  *   must then not modify the sources until the copies have completed.
  * For D2H / D2D: direct async DMA without staging.
  *

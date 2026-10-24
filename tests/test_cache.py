@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import mmap
 import random
 
 import numpy as np
@@ -113,6 +114,9 @@ MINI_PYTEST_PARAMS = {
         "device": ["xpu:0"],
     },
     "test_swap_blocks_batch_h2d_pinned_no_snapshot": {
+        "device": ["xpu:0"],
+    },
+    "test_swap_blocks_batch_h2d_registered_no_snapshot": {
         "device": ["xpu:0"],
     },
     "test_gather_and_maybe_dequant_cache_mla": {
@@ -1163,6 +1167,61 @@ def test_swap_blocks_batch_h2d_pinned_no_snapshot(device: str) -> None:
         torch.xpu.synchronize(device)
         assert torch.all(dst == value + t), (
             f"trial {t}: H2D copy did not see the preceding D2H copy")
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_swap_blocks_batch_h2d_registered_no_snapshot(device: str) -> None:
+    """Host memory registered with xpu_host_register is reported by SYCL as
+    usm::alloc::unknown, not USM host. With snapshot_src=False it must still
+    be copied directly, reading the source in stream order: the H2D copy
+    must see a D2H copy into the same range queued just before it."""
+    torch.xpu.set_device(device)
+
+    n_blocks = 32
+    block_elems = 1 << 12
+    block_bytes = block_elems * 4
+    total = n_blocks * block_bytes
+    mm = 2048
+    trials = 8
+    poison, value = -7.0, 3.0
+
+    src = torch.empty(n_blocks * block_elems,
+                      device=device,
+                      dtype=torch.float32)
+    dst = torch.empty_like(src)
+    a = torch.randn(mm, mm, device=device, dtype=torch.float32)
+    b = torch.randn(mm, mm, device=device, dtype=torch.float32)
+
+    with mmap.mmap(-1, total) as region:
+        host = torch.frombuffer(memoryview(region), dtype=torch.float32)
+        assert ops.xpu_host_register(host.data_ptr(), total)
+        try:
+            block_mapping = [(i, i) for i in range(n_blocks)]
+            d2h = _build_batch_args(src.view(n_blocks, block_elems),
+                                    host.view(n_blocks, block_elems),
+                                    block_mapping, block_bytes)
+            h2d = _build_batch_args(host.view(n_blocks, block_elems),
+                                    dst.view(n_blocks, block_elems),
+                                    block_mapping, block_bytes)
+            for t in range(trials):
+                host.fill_(poison)
+                dst.fill_(poison)
+                torch.xpu.synchronize(device)
+                # Keep the stream busy so the D2H copy is still pending when
+                # the H2D copy is submitted.
+                c = a
+                for _ in range(6):
+                    c = torch.mm(c, b)
+                src.fill_(value + t)
+                ops.swap_blocks_batch(*d2h)
+                ops.swap_blocks_batch(*h2d, snapshot_src=False)
+                torch.xpu.synchronize(device)
+                assert torch.all(dst == value + t), (
+                    f"trial {t}: H2D copy did not see the preceding D2H copy")
+        finally:
+            assert ops.xpu_host_unregister(host.data_ptr())
+            del host
 
 
 @pytest.mark.skipif(torch.xpu.device_count() < 2,
